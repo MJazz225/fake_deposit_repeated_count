@@ -1,0 +1,179 @@
+#########################################################################
+#
+# made by Marshaw
+#
+# excel的起始日期是1899-12-30
+#
+# 最新更新：9/1/2024
+# AWS导出的csv档案计算异常交易客户的盈利
+#
+#######################################################################
+
+rm(list=ls())
+
+library(readxl)
+library(dplyr)
+library(openxlsx)
+library(officer)
+library(flextable)
+library(lubridate)
+library(readxl)
+
+##同一个member_id, 同一个策略，同一个时间
+
+wb <- loadWorkbook("Downloads/1112匿名郵箱策略.xlsx") #现存标签， 先手动整理把三个sheet放在一起
+sheet_names <- names(wb)
+data_now <- read.xlsx(wb, sheet = 2) 
+data_now[,"create_time"]<- as.POSIXct(data_now[,"create_time"] %>% unlist() %>% as.numeric()*86400, origin = "1899-12-30", tz = "UTC") %>% as.data.frame()
+
+# 去重 my_data 数据框的 member_id 列
+unique_reason <- data_now %>%
+  distinct(reason, .keep_all = F)
+
+data_now$reason <- sub("策略\\[平台风控-充值后快速提现-非活跃匿名邮箱\\]",NA,data_now$reason)
+data_now$reason <- sub("策略\\[平台风控-充值后快速提现-无有效匿名邮箱\\]",NA,data_now$reason)
+data_now$reason <- sub("策略\\[平台风控-1小时累计提现金额匿名邮箱\\]","一小时",data_now$reason)
+data_now$reason <- sub("策略\\[平台风控-3小时累计提现金额匿名邮箱\\]","三小时",data_now$reason)
+data_now$reason <- sub("策略\\[平台风控-1天累计提现金额匿名邮箱\\]","一天",data_now$reason)
+data_now$reason <- sub("策略\\[平台风控-3天累计提现金额匿名邮箱\\]","三天",data_now$reason)
+
+data_need <- data_now[,c("member_id","reason","create_time","amount_usdt","currency", "amount.type")]
+data_need <- na.omit(data_need)
+tem <- data_need %>% filter(data_need$reason == "一小时")
+tem_onehour <- tem$create_time - hours(1)
+tem <- cbind(tem[,c(1,2)], tem_onehour, tem[,c(3:6)])
+data_need1 <- NULL
+data_need1 <- rbind(data_need1, tem)
+
+tem <- data_need %>% filter(data_need$reason == "三小时")
+tem_onehour <- tem$create_time - hours(3)
+tem <- cbind(tem[,c(1,2)], tem_onehour, tem[,c(3:6)])
+data_need1 <- rbind(data_need1, tem)
+
+tem <- data_need %>% filter(data_need$reason == "一天")
+tem_onehour <- tem$create_time - hours(24)
+tem <- cbind(tem[,c(1,2)], tem_onehour, tem[,c(3:6)])
+data_need1 <- rbind(data_need1, tem)
+
+tem <- data_need %>% filter(data_need$reason == "三天")
+tem_onehour <- tem$create_time - hours(72)
+tem <- cbind(tem[,c(1,2)], tem_onehour, tem[,c(3:6)])
+data_need1 <- rbind(data_need1, tem)
+
+data_hour <- data_need1 %>% filter(data_need1$reason != "一天" )
+data_hour <- data_hour %>% filter(data_hour$reason != "三天" )
+data_day <- data_need1 %>% filter(data_need1$reason != "一小时" )
+data_day <- data_day %>% filter(data_day$reason != "三小时" )
+
+list_hour <- split(data_hour, f = data_hour$member_id)
+list_day <- split(data_day, f = data_day$member_id)
+
+list_need <- split(data_need1, f = data_need1$member_id)
+filtered_list <- Filter(function(x) nrow(x) > 1, list_need)
+filtered_data <- NULL
+
+################################### 处理小时的 ########################################################
+filtered_list_hour <- Filter(function(x) nrow(x) > 1, list_hour)
+
+# 创建一个函数，用于比对两个时间区间是否有重叠
+check_overlap <- function(start1, end1, start2, end2) {
+  return(!(start1 >= end2 || end1 <= start2))
+}
+
+repeat_count_data_hour1 <- NULL
+for (k in 1:length(filtered_list_hour)) {
+  cat(k,"/",length(filtered_list_hour),"\n")
+  
+  tem <- filtered_list_hour[[k]]
+  # 初始化一个矩阵来存储比对结果
+  n <- nrow(tem)
+  overlap_matrix <- matrix(FALSE, n, n)
+  # 使用嵌套循环比对所有组合
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      overlap <- check_overlap(tem$tem_onehour[i], tem$create_time[i], tem$tem_onehour[j], tem$create_time[j])
+      overlap_matrix[i, j] <- overlap
+      overlap_matrix[j, i] <- overlap
+    }
+  }
+  # 输出重叠次数
+  need_matrix <- overlap_matrix[,c(1,2)]
+  # 执行逻辑 OR 运算，生成一列结果
+  result_vector <- need_matrix[, 1] | need_matrix[, 2]
+  # 输出结果向量
+  
+  tem_data <- cbind(tem[1,1], sum(result_vector))
+  repeat_count_data_hour1 <- rbind(repeat_count_data_hour1, tem_data)
+}
+repeat_count_data_hour1 <- na.omit(repeat_count_data_hour1 %>% as.data.frame())
+sum(repeat_count_data_hour1[,2] %>% as.numeric())
+
+################################### 处理天数的 ########################################################
+filtered_list_day <- Filter(function(x) nrow(x) > 1, list_day)
+
+repeat_count_data_day <- NULL
+for (k in 1:length(filtered_list_day)) {
+  cat(k,"/",length(filtered_list_day),"\n")
+  
+  tem <- filtered_list_day[[k]]
+  # 初始化一个矩阵来存储比对结果
+  n <- nrow(tem)
+  overlap_matrix <- matrix(FALSE, n, n)
+  # 使用嵌套循环比对所有组合
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      overlap <- check_overlap(tem$tem_onehour[i], tem$create_time[i], tem$tem_onehour[j], tem$create_time[j])
+      overlap_matrix[i, j] <- overlap
+      overlap_matrix[j, i] <- overlap
+    }
+  }
+  # 输出重叠次数
+  need_matrix <- overlap_matrix[,c(1,2)]
+  # 执行逻辑 OR 运算，生成一列结果
+  result_vector <- need_matrix[, 1] | need_matrix[, 2]
+  # 输出结果向量
+  
+  tem_data <- cbind(tem[1,1], sum(result_vector))
+  repeat_count_data_day <- rbind(repeat_count_data_day, tem_data)
+}
+repeat_count_data_day <- na.omit(repeat_count_data_day %>% as.data.frame())
+
+colnames(repeat_count_data_day) <- c("member_id", "重复命中策略次数")
+row_counts <- sapply(filtered_list_hour, function(df) nrow(df))
+repeat_count_data_hour1 <- cbind(repeat_count_data_hour1,row_counts)
+chongdie <- round(repeat_count_data_hour1[,2] %>% as.numeric()/repeat_count_data_hour1[,3] %>% as.numeric(),4)
+repeat_count_data_hour1 <- cbind(repeat_count_data_hour1,chongdie)
+colnames(repeat_count_data_hour1) <- c("member_id", "重复命中策略次数","资料笔数","重叠率")
+
+row_counts <- sapply(filtered_list_day, function(df) nrow(df))
+repeat_count_data_day <- cbind(repeat_count_data_day,row_counts)
+chongdie <- round(repeat_count_data_day[,2] %>% as.numeric()/repeat_count_data_day[,3] %>% as.numeric(),4)
+repeat_count_data_day <- cbind(repeat_count_data_day,chongdie)
+colnames(repeat_count_data_day) <- c("member_id", "重复命中策略次数","资料笔数","重叠率")
+
+
+repeat_times_hour <- sum(repeat_count_data_hour1[,2] %>% as.numeric())
+data_count_hour <- sum(repeat_count_data_hour1[,3] %>% as.numeric())
+percent_hour <- repeat_times_hour/data_count_hour
+a <- cbind("小时纬度总数",repeat_times_hour,data_count_hour,percent_hour)
+colnames(a) <- c("member_id", "重复命中策略次数","资料笔数","重叠率")
+repeat_count_data_hour1 <- rbind(repeat_count_data_hour1, a)
+
+repeat_times_day <- sum(repeat_count_data_day[,2] %>% as.numeric())
+data_count_day <- sum(repeat_count_data_day[,3] %>% as.numeric())
+percent_day <- repeat_times_day/data_count_day
+b <- cbind("天纬度总数",repeat_times_day, data_count_day, percent_day)
+colnames(b) <- c("member_id", "重复命中策略次数","资料笔数","重叠率")
+repeat_count_data_day <- rbind(repeat_count_data_day, b)
+
+wb <- createWorkbook()
+addWorksheet(wb, "小时资料")
+writeData(wb, "小时资料", repeat_count_data_hour1)
+addWorksheet(wb, "天纬度资料")
+writeData(wb, "天纬度资料", repeat_count_data_day)
+# 保存 Excel 文件
+saveWorkbook(wb, "匿名邮箱策略.xlsx", overwrite = TRUE)
+
+
+x <- list_day[["e124df7cf08d4fde8e8ff7be047a551c"]]
+
